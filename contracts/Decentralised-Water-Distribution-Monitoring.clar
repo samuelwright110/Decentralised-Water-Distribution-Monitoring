@@ -126,6 +126,17 @@
     { active-certificates: (list 10 uint) }
 )
 
+(define-map station-alert-profiles
+    { station-id: uint }
+    {
+        flow-threshold: uint,
+        ph-min: uint,
+        ph-max: uint,
+        turbidity-max: uint,
+        temperature-max: uint,
+    }
+)
+
 (define-public (register-station
         (name (string-ascii 50))
         (location (string-ascii 100))
@@ -266,9 +277,30 @@
                 (map-get? station-alert-counters { station-id: station-id })
             ))
             (current-block u1)
+            (profile (map-get? station-alert-profiles { station-id: station-id }))
+            (flow-threshold (match profile
+                p (get flow-threshold p)
+                (var-get global-alert-threshold)
+            ))
+            (ph-min (match profile
+                p (get ph-min p)
+                u650
+            ))
+            (ph-max (match profile
+                p (get ph-max p)
+                u850
+            ))
+            (turbidity-max (match profile
+                p (get turbidity-max p)
+                u500
+            ))
+            (temperature-max (match profile
+                p (get temperature-max p)
+                u350
+            ))
         )
         (begin
-            (if (< flow-rate (var-get global-alert-threshold))
+            (if (< flow-rate flow-threshold)
                 (map-set station-alerts {
                     station-id: station-id,
                     alert-id: (+ (get counter alert-counter) u1),
@@ -282,7 +314,7 @@
                 true
             )
 
-            (if (or (< ph-level u650) (> ph-level u850))
+            (if (or (< ph-level ph-min) (> ph-level ph-max))
                 (map-set station-alerts {
                     station-id: station-id,
                     alert-id: (+ (get counter alert-counter) u2),
@@ -296,7 +328,7 @@
                 true
             )
 
-            (if (> turbidity u500)
+            (if (> turbidity turbidity-max)
                 (map-set station-alerts {
                     station-id: station-id,
                     alert-id: (+ (get counter alert-counter) u3),
@@ -310,7 +342,7 @@
                 true
             )
 
-            (if (> temperature u350)
+            (if (> temperature temperature-max)
                 (map-set station-alerts {
                     station-id: station-id,
                     alert-id: (+ (get counter alert-counter) u4),
@@ -445,6 +477,41 @@
     )
 )
 
+(define-public (set-station-alert-profile
+        (station-id uint)
+        (flow-threshold uint)
+        (ph-min uint)
+        (ph-max uint)
+        (turbidity-max uint)
+        (temperature-max uint)
+    )
+    (let ((station (unwrap! (map-get? water-stations { station-id: station-id })
+            ERR_STATION_NOT_FOUND
+        )))
+        (asserts!
+            (or
+                (is-eq tx-sender (get owner station))
+                (is-eq tx-sender CONTRACT_OWNER)
+            )
+            ERR_UNAUTHORIZED
+        )
+        (asserts! (> flow-threshold u0) ERR_INVALID_THRESHOLD)
+        (asserts! (and (>= ph-min u0) (<= ph-min u1400)) ERR_INVALID_DATA)
+        (asserts! (and (>= ph-max u0) (<= ph-max u1400)) ERR_INVALID_DATA)
+        (asserts! (> ph-max ph-min) ERR_INVALID_DATA)
+        (asserts! (< turbidity-max u10000) ERR_INVALID_DATA)
+        (asserts! (< temperature-max u1000) ERR_INVALID_DATA)
+        (map-set station-alert-profiles { station-id: station-id } {
+            flow-threshold: flow-threshold,
+            ph-min: ph-min,
+            ph-max: ph-max,
+            turbidity-max: turbidity-max,
+            temperature-max: temperature-max,
+        })
+        (ok true)
+    )
+)
+
 ;; Water Quality Certification System Functions
 
 (define-public (certify-laboratory
@@ -461,9 +528,11 @@
         (asserts! (> (len name) u0) ERR_INVALID_CERTIFICATE_DATA)
         (asserts! (> (len accreditation-number) u0) ERR_INVALID_CERTIFICATE_DATA)
         (asserts! (> (len location) u0) ERR_INVALID_CERTIFICATE_DATA)
-        (asserts! (is-none (map-get? lab-principals-to-ids { lab-principal: lab-principal }))
-            ERR_INVALID_CERTIFICATE_DATA)
-        
+        (asserts!
+            (is-none (map-get? lab-principals-to-ids { lab-principal: lab-principal }))
+            ERR_INVALID_CERTIFICATE_DATA
+        )
+
         (map-set certified-laboratories { lab-id: new-lab-id } {
             name: name,
             principal: lab-principal,
@@ -472,7 +541,7 @@
             accreditation-number: accreditation-number,
             location: location,
         })
-        
+
         (map-set lab-principals-to-ids { lab-principal: lab-principal } { lab-id: new-lab-id })
         (var-set lab-counter new-lab-id)
         (ok new-lab-id)
@@ -480,11 +549,9 @@
 )
 
 (define-public (revoke-laboratory-certification (lab-id uint))
-    (let (
-            (lab (unwrap! (map-get? certified-laboratories { lab-id: lab-id })
-                ERR_LAB_NOT_CERTIFIED
-            ))
-        )
+    (let ((lab (unwrap! (map-get? certified-laboratories { lab-id: lab-id })
+            ERR_LAB_NOT_CERTIFIED
+        )))
         (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
         (map-set certified-laboratories { lab-id: lab-id }
             (merge lab { certified: false })
@@ -514,7 +581,7 @@
         (asserts! (> (len certificate-type) u0) ERR_INVALID_CERTIFICATE_DATA)
         (asserts! (> (len compliance-status) u0) ERR_INVALID_CERTIFICATE_DATA)
         (asserts! (> validity-days u0) ERR_INVALID_CERTIFICATE_DATA)
-        
+
         (map-set water-quality-certificates { certificate-id: new-cert-id } {
             station-id: station-id,
             lab-id: lab-id,
@@ -526,8 +593,10 @@
             certificate-hash: certificate-hash,
             active: true,
         })
-        
-        (unwrap! (add-certificate-to-station station-id new-cert-id) ERR_INVALID_DATA)
+
+        (unwrap! (add-certificate-to-station station-id new-cert-id)
+            ERR_INVALID_DATA
+        )
         (var-set certificate-counter new-cert-id)
         (ok new-cert-id)
     )
@@ -539,18 +608,23 @@
         (new-certificate-hash (string-ascii 64))
     )
     (let (
-            (cert (unwrap! (map-get? water-quality-certificates { certificate-id: certificate-id })
+            (cert (unwrap!
+                (map-get? water-quality-certificates { certificate-id: certificate-id })
                 ERR_CERTIFICATE_NOT_FOUND
             ))
             (current-block stacks-block-height)
             (new-expiry (+ current-block new-validity-days))
         )
         (asserts! (is-certified-lab tx-sender) ERR_LAB_NOT_CERTIFIED)
-        (asserts! (is-eq (get lab-id cert) 
-            (unwrap! (get-lab-id-by-principal tx-sender) ERR_LAB_NOT_CERTIFIED)
-        ) ERR_UNAUTHORIZED)
+        (asserts!
+            (is-eq (get lab-id cert)
+                (unwrap! (get-lab-id-by-principal tx-sender)
+                    ERR_LAB_NOT_CERTIFIED
+                ))
+            ERR_UNAUTHORIZED
+        )
         (asserts! (> new-validity-days u0) ERR_INVALID_CERTIFICATE_DATA)
-        
+
         (map-set water-quality-certificates { certificate-id: certificate-id }
             (merge cert {
                 issue-date: current-block,
@@ -564,24 +638,24 @@
 )
 
 (define-public (revoke-certificate (certificate-id uint))
-    (let (
-            (cert (unwrap! (map-get? water-quality-certificates { certificate-id: certificate-id })
-                ERR_CERTIFICATE_NOT_FOUND
-            ))
-        )
+    (let ((cert (unwrap!
+            (map-get? water-quality-certificates { certificate-id: certificate-id })
+            ERR_CERTIFICATE_NOT_FOUND
+        )))
         (asserts!
             (or
                 (is-eq tx-sender CONTRACT_OWNER)
                 (and
                     (is-certified-lab tx-sender)
                     (is-eq (get lab-id cert)
-                        (unwrap! (get-lab-id-by-principal tx-sender) ERR_LAB_NOT_CERTIFIED)
-                    )
+                        (unwrap! (get-lab-id-by-principal tx-sender)
+                            ERR_LAB_NOT_CERTIFIED
+                        ))
                 )
             )
             ERR_UNAUTHORIZED
         )
-        
+
         (map-set water-quality-certificates { certificate-id: certificate-id }
             (merge cert { active: false })
         )
@@ -611,17 +685,21 @@
     )
 )
 
-(define-private (add-certificate-to-station (station-id uint) (certificate-id uint))
-    (let (
-            (current-certs (default-to { active-certificates: (list) }
-                (map-get? station-certificates { station-id: station-id })
-            ))
+(define-private (add-certificate-to-station
+        (station-id uint)
+        (certificate-id uint)
+    )
+    (let ((current-certs (default-to { active-certificates: (list) }
+            (map-get? station-certificates { station-id: station-id })
+        )))
+        (map-set station-certificates { station-id: station-id } { active-certificates: (unwrap!
+            (as-max-len?
+                (append (get active-certificates current-certs) certificate-id)
+                u10
+            )
+            (err u999)
+        ) }
         )
-        (map-set station-certificates { station-id: station-id } {
-            active-certificates: (unwrap! (as-max-len? 
-                (append (get active-certificates current-certs) certificate-id) u10
-            ) (err u999))
-        })
         (ok true)
     )
 )
@@ -770,8 +848,12 @@
             days-until-expiry: (if (> (get expiry-date cert) stacks-block-height)
                 (- (get expiry-date cert) stacks-block-height)
                 u0
-            )
+            ),
         })
         none
     )
+)
+
+(define-read-only (get-station-alert-profile (station-id uint))
+    (map-get? station-alert-profiles { station-id: station-id })
 )
